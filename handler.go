@@ -51,8 +51,6 @@ type Handler struct {
 
 	// Only run replacements on responses that match against this ResponseMmatcher.
 	Matcher *caddyhttp.ResponseMatcher `json:"match,omitempty"`
-
-	transformerPool *sync.Pool
 }
 
 // CaddyModule returns the Caddy module information.
@@ -86,38 +84,12 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		}
 	}
 
-	placeholderRepl := caddy.NewReplacer()
-
-	h.transformerPool = &sync.Pool{
-		New: func() interface{} {
-			transforms := make([]transform.Transformer, len(h.Replacements))
-			for i, repl := range h.Replacements {
-				finalReplace := placeholderRepl.ReplaceKnown(repl.Replace, "")
-
-				if repl.re != nil {
-					tr := replace.RegexpString(repl.re, finalReplace)
-
-					// See: https://github.com/icholy/replace/issues/5#issuecomment-949757616
-					tr.MaxMatchSize = 2048
-					transforms[i] = tr
-				} else {
-					finalSearch := placeholderRepl.ReplaceKnown(repl.Search, "")
-					transforms[i] = replace.String(finalSearch, finalReplace)
-				}
-			}
-			return transform.Chain(transforms...)
-		},
-	}
-
 	return nil
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-
-	tr := h.transformerPool.Get().(transform.Transformer)
-	tr.Reset()
-	defer h.transformerPool.Put(tr)
+	tr := h.CreateTransformer(r)
 
 	if h.Stream {
 		// don't buffer response body, perform streaming replacement
@@ -179,6 +151,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	w.Write(result)
 
 	return nil
+}
+
+func (h *Handler) CreateTransformer(r *http.Request) transform.Transformer {
+	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
+
+	transforms := make([]transform.Transformer, len(h.Replacements))
+	for i, op := range h.Replacements {
+		finalReplace := repl.ReplaceKnown(op.Replace, "")
+
+		if op.re != nil {
+			tr := replace.RegexpString(op.re, finalReplace)
+
+			// See: https://github.com/icholy/replace/issues/5#issuecomment-949757616
+			tr.MaxMatchSize = 2048
+			transforms[i] = tr
+		} else {
+			finalSearch := repl.ReplaceKnown(op.Search, "")
+			transforms[i] = replace.String(finalSearch, finalReplace)
+		}
+	}
+
+	// TODO: replace advises not to use transform.Chain due to https://github.com/golang/go/issues/49117
+	return transform.Chain(transforms...)
 }
 
 // Replacement is either a substring or regular expression replacement
